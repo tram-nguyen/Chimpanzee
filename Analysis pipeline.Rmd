@@ -1,0 +1,314 @@
+---
+title: "Chimp Pop Gen"
+author: "Tram Nguyen"
+date: "5/9/2020"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Chimp Population Genetics Anaylsis
+
+
+### Getting a STRUCTURE Plot
+
+Step 1. 
+Sometimes it is useful to generate a pruned subset of SNPs that are in approximate linkage equilibrium with each other. This can be achieved via two commands: --indep which prunes based on the variance inflation factor (VIF), which recursively removes SNPs within a sliding window; second, --indep-pairwise which is similar, except it is based only on pairwise genotypic correlation.
+
+Step 2. Convert VCF files to .bed .bim .fam files using PLINK
+
+
+```{bash making .bed .bim .fam files from your vcf, eval = FALSE}
+/programs/plink-1.9-x86_64-beta3.46/plink --vcf joint_genotype_filtered_SNPs_only.vcf --chr-set 24 --keep-allele-order --vcf-idspace-to _ --allow-extra-chr --const-fid --out joint_filtered_snps
+```
+
+Step 2. Choose your model complexity -- Run python script (provided by FastStructure) to figure out range of possible K values. 
+
+
+```{bash executing the faststructure program, eval = FALSE}
+python chooseK.py --input=join_filtered_SNPs_only
+```
+
+
+###Calculating inbreeding coefficient in Plink
+
+1. IBC analyses are compared to expected allele frequencies in a panmictic non-inbred population. It determines whether windows of the genome are more homozygous than expected in a population at HWE to determine if it is inbred.The closest thing we have to a large panmitic population is using all the chimps we have (our joint filtered snps + pardo's). Therefore, I will run the inbreeding analysis on the entire data set that is merged, and then just subset out our individuals to look at their individual inbreeding coefficients. 
+
+First, let's get a list of our sample IDs for our individuals so we can subset later. Then convert the entire pardo+our dataset to bfiles for plink. Let's also LD prune our data.
+
+```{bash get sample IDs from VCF and LD prune, eval = FALSE}
+bcftools query -l joint_genotype_filtered_SNPs_only_merge_PradoMartinez.vcf > samples_ID.txt
+
+#make bfiles for a combined set of chimps and LD prune.
+/programs/plink-1.9-x86_64-beta3.46/plink --vcf joint_genotype_filtered_SNPs_only_merge_PradoMartinez.vcf --chr-set 24 --keep-allele-order --vcf-idspace-to _ --allow-extra-chr --const-fid --out all_snps
+
+#Prune for LD
+#a) consider a window of 50 SNPs
+#b) calculate LD between each pair of SNPs in the window
+#b) remove one of a pair of SNPs if the LD is greater than 0.5
+#c) shift the window 5 SNPs forward and repeat the procedure
+
+#get a list of the snps in LD
+/programs/plink-1.9-x86_64-beta3.46/plink --bfile all_snps --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --indep-pairwise 50 5 0.5 --out prune_snps_set
+#extract those specific snps from data
+/programs/plink-1.9-x86_64-beta3.46/plink --bfile all_snps --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --extract prune_snps_set.prune.in --recode --out all_snps_LDpruned #this outputs new .map and .ped files that you will need to make back into bfiles
+
+#recode your new .map and .ped files that are LD pruned to be .bed .fam .bim
+/programs/plink-1.9-x86_64-beta3.46/plink --file all_snps_LDpruned --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --out all_snps_LDpruned
+```
+
+2. The analyses will draw expected allele frequencies from the entire dataset and compare each individual's genome to it. Let's run the IBC analysis
+
+```{bash running the ibc command in plink, eval= FALSE}
+/programs/plink-1.9-x86_64-beta3.46/plink --bfile all_snps_LDpruned --allow-extra-chr 0 --allow-no-sex --chr-set 48 --nonfounders --ibc --out IBC_2Mar20
+
+```
+
+After running the analyses, we get outputs called:
+IBC_2Mar20.ibc
+IBC_2Mar20.nosex
+IBC_2Mar20.log
+
+
+3. We now have a list of all the individuals' IBC. Using R we subset out ours and graph it.
+
+```{R graph ibc, eval= FALSE}
+ibd.df<-read.delim("Analyses/IBC/IBC_2Mar20.ibc", as.is=T)
+oursamples<-read.delim("Analyses/IBC/samples_ID.txt", header=F) #get a vector of our individuals
+oursamples<-oursamples$V1
+oursamples<-oursamples[1:88]
+View(oursamples)
+
+popvec<-rep(c("Ours", "Pardo"), c(length(oursamples), nrow(ibd.df)-length(oursamples)))
+ibd.df$pop<-popvec
+
+library(ggplot2)
+library("ggplot2")
+
+a<-ggplot(ibd.df, aes(ibd.df$IID, ibd.df$Fhat1, fill=pop, colour=pop)) +
+  geom_point()+
+  xlab("")+ylab("Inbreeding Coefficient (Fhat1)")+
+  ggtitle("Individual Inbreeding Coefficients")+
+  theme(plot.title = element_text(hjust=0.5))+
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust=0.5, size=11))
+a
+ggsave(a, file="individual_inbreeding_coeff.png", height=4, width=8, units="in", dpi=600, device = "png")
+
+```
+
+
+### Calcuating pairwise identity-by-descent (IBD, relatedness) between individuals
+This analysis can be done with or without LD pruning first. We will do it both ways.
+The pairwise clustering based on IBS, as outlined in the previous section is useful for detecting pairs of individuals who look more different from each other than you'd expect in a random, homogeneous sample. In this section, we consider using the same genotype data to provide a complementary analysis: using estimates of pairwise IBD to find pairs of individuals who look too similar to eachother, i.e. more than we would expect by chance in a random sample.
+In a homogeneous sample, it is possible to calculate genome-wide IBD given IBS information, as long as a large number of SNPs are available (probably 1000 independent SNPs at a bare minimum; ideally 100K or more).
+
+
+1. convert VCFs to plink format.
+
+```{bash, eval = FALSE}
+/programs/plink-1.9-x86_64-beta3.46/plink --vcf joint_genotype_filtered_SNPs_only.vcf --chr-set 24 --keep-allele-order --vcf-idspace-to _ --allow-extra-chr --const-fid --out joint_filtered_snps
+```
+
+2. Without LD Prune data: run PLINK
+
+```{bash, eval = FALSE}
+/programs/plink-1.9-x86_64-beta3.46/plink --bfile joint_filtered_snps --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --genome --mind 0.05 --out joint_filt_snps_noLDprune
+```
+
+
+
+Sometimes it is useful to generate a pruned subset of SNPs that are in approximate linkage equilibrium with each other. This can be achieved via two commands: --indep which prunes based on the variance inflation factor (VIF), which recursively removes SNPs within a sliding window; second, --indep-pairwise which is similar, except it is based only on pairwise genotypic correlation.
+Hint The output of either of these commands is two lists of SNPs: those that are pruned out and those that are not. A separate command using the --extract or --exclude option is necessary to actually perform the pruning.
+The VIF pruning routine is performed:
+plink --file data --indep 50 5 2
+will create files
+     plink.prune.in
+     plink.prune.out
+Each is a simlpe list of SNP IDs; both these files can subsequently be specified as the argument for a --extract or --exclude command.
+The parameters for --indep are: window size in SNPs (e.g. 50), the number of SNPs to shift the window at each step (e.g. 5), the VIF threshold. The VIF is 1/(1-R^2) where R^2 is the multiple correlation coefficient for a SNP being regressed on all other SNPs simultaneously. That is, this considers the correlations between SNPs but also between linear combinations of SNPs. A VIF of 10 is often taken to represent near collinearity problems in standard multiple regression analyses (i.e. implies R^2 of 0.9). A VIF of 1 would imply that the SNP is completely independent of all other SNPs. Practically, values between 1.5 and 2 should probably be used; particularly in small samples, if this threshold is too low and/or the window size is too large, too many SNPs may be removed.
+The second procedure is performed:
+plink --file data --indep-pairwise 50 5 0.5
+This generates the same output files as the first version; the only difference is that a simple pairwise threshold is used. The first two parameters (50 and 5) are the same as above (window size and step); the third parameter represents the r^2 threshold. Note: this represents the pairwise SNP-SNP metric now, not the multiple correlation coefficient; also note, this is based on the genotypic correlation, i.e. it does not involve phasing.
+To give a concrete example: the command above that specifies 50 5 0.5 would a) consider a window of 50 SNPs, b) calculate LD between each pair of SNPs in the window, b) remove one of a pair of SNPs if the LD is greater than 0.5, c) shift the window 5 SNPs forward and repeat the procedure.
+To make a new, pruned file, then use something like (in this example, we also convert the standard PED fileset to a binary one):
+plink --file data --extract plink.prune.in --make-bed --out pruneddata
+
+
+--indep requires three parameters: a window size in variant count or kilobase (if the 'kb' modifier is present) units, a variant count to shift the window at the end of each step, and a variance inflation factor (VIF) threshold. At each step, all variants in the current window with VIF exceeding the threshold are removed. See the PLINK 1.07 documentation for some discussion of parameter choices.
+
+--indep-pairwise takes the same first two parameters as --indep. Its third parameter is a pairwise r2 threshold: at each step, pairs of variants in the current window with squared correlation greater than the threshold are noted, and variants are greedily pruned from the window until no such pairs remain. Since it does not need to keep the entire <window size> x <window size> correlation matrix in memory, it is usually capable of handling 6-digit window sizes well outside --indep's reach.
+
+If you're using a variant-count window (e.g. "--indep-pairwise 500 50 0.5"), chromosomal position is irrelevant; only the order of SNPs in your file matters.  If you're using a kilobase window (e.g. "--indep-pairwise 500kb 1 0.5"), and there's no positional information for a contig (all POS values are 0), the window will contain the entire contig.
+
+
+3. Prune for LD
+
+a) consider a window of 50 SNPs
+b) calculate LD between each pair of SNPs in the window
+b) remove one of a pair of SNPs if the LD is greater than 0.5
+c) shift the window 5 SNPs forward and repeat the procedure
+
+```{bash, eval = FALSE}
+/programs/plink-1.9-x86_64-beta3.46/plink --bfile joint_filtered_snps --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --indep-pairwise 50 5 0.5 --out prune_snps_set
+
+/programs/plink-1.9-x86_64-beta3.46/plink --bfile joint_filtered_snps --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --extract prune_snps_set.prune.in --recode --out joint_filtered_snps_LDpruned 
+#this outputs new .map and .ped files that you will need to make back into bfiles
+
+
+#recode your new .map and .ped files that are LD pruned to be .bed .fam .bim
+
+/programs/plink-1.9-x86_64-beta3.46/plink --file joint_filtered_snps_LDpruned --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --out joint_filtered_snps_LDpruned
+```
+
+Output files:
+joint_filtered_snps_LDpruned.bed
+joint_filtered_snps_LDpruned.bim
+joint_filtered_snps_LDpruned.fam
+
+4. With LD Prune data: run PLINK IBD
+
+```{bash, eval = FALSE}
+/programs/plink-1.9-x86_64-beta3.46/plink --bfile joint_filtered_snps_LDpruned --allow-no-sex --nonfounders --chr-set 24 --allow-extra-chr --genome --mind 0.05 --out joint_filt_snps_LDpruned
+```
+
+5. Visualize the pairwise IBDs in a heatmap
+Let's start with the non LD pruned data
+
+```{R, eval = FALSE}
+ibd.noLDprune<-read.delim("Analyses/IBD/joint_filt_snps_noLDprune.genome", header=T, as.is=T, sep="")
+
+ibd.noLDprune<-ibd.noLDprune[,c("IID1","IID2","PI_HAT")]
+
+library(reshape2)
+
+#convert long-to-wide
+x <- dcast(ibd.noLDprune, IID1 ~ IID2, value.var = "PI_HAT")
+
+# convert to matrix with column AND rownames
+myM <- as.matrix(x[ , -1 ])
+row.names(myM) <- x$IID1
+
+# I am converting all NAs to 0, reconsider if this is suitable in your case.
+myM[ is.na(myM) ] <- 0
+
+#then plot
+#install.packages("pheatmap")
+library(pheatmap)
+pheatmap(myM, fontsize_row=10, fontsize_col =10)
+
+pdf('pi_het_ibd_noLDprune.pdf')
+pheatmap(myM)
+dev.off()
+```
+
+Now a heatmap with LD pruned data
+```{R, eval = FALSE}
+ibd.LDprune<-read.delim("Analyses/IBD/joint_filt_snps_LDpruned.genome", header=T, as.is=T, sep="")
+
+ibd.LDprune<-ibd.LDprune[,c("IID1","IID2","PI_HAT")]
+
+library(reshape2)
+
+#convert long-to-wide
+x <- dcast(ibd.LDprune, IID1 ~ IID2, value.var = "PI_HAT")
+
+# convert to matrix with column AND rownames
+myM <- as.matrix(x[ , -1 ])
+row.names(myM) <- x$IID1
+
+# I am converting all NAs to 0, reconsider if this is suitable in your case.
+myM[ is.na(myM) ] <- 0
+
+#then plot
+#install.packages("pheatmap")
+library(pheatmap)
+pheatmap(myM, fontsize_row=10, fontsize_col =10)
+
+pdf('pi_het_ibd_noLDpruned.pdf')
+pheatmap(myM, fontsize_row=10, fontsize_col =10)
+dev.off()
+```
+
+> summary(ibd.noLDprune$PI_HAT)
+   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+ 0.0000  0.1592  0.2391  0.2272  0.2802  0.6899 
+ 
+boxplot(ibd.noLDprune$PI_HAT)
+
+
+```{R, eval = FALSE}
+#get a list of pairwise relationships that are 0.50
+ibd.noLDprune<-read.delim("Analyses/IBD/joint_filt_snps_noLDprune.genome", header=T, as.is=T, sep="")
+ibd.noLDprune<-ibd.noLDprune[,c("IID1","IID2","Z0", "Z1", "Z2","PI_HAT")]
+rt_morethan0.5<-ibd.noLDprune[which(ibd.noLDprune$PI_HAT >=0.45),]
+rt_morethan0.5<-data.frame(rt_morethan0.5)
+
+write.table(rt_morethan0.5, "highly_related_chimps.txt", quote = F, row.names = F, sep="\t")
+
+#check on the two individuals with similar RT
+ibd.noLDprune<-read.delim("Analyses/IBD/joint_filt_snps_noLDprune.genome", header=T, as.is=T, sep="")
+ibd.noLDprune<-ibd.noLDprune[,c("IID1","IID2","Z0", "Z1", "Z2","PI_HAT")]
+c.df<-ibd.noLDprune[which(ibd.noLDprune$IID1 == "NS08882" & ibd.noLDprune$IID2== "NS08889"),]
+
+write.table(c.df, "NS82_NS89_ibd.txt", col.names = T, row.names = F, quote = F, sep = "\t")
+
+PO <- rt_morethan0.5[which(rt_morethan0.5$Z1 >=0.9),]
+
+write.table(PO, "parent_offspring_pairs.txt", col.names = T, row.names = F, quote = F, sep = "\t")
+
+FS <- rt_morethan0.5[which(rt_morethan0.5$Z1 >=0.45),]
+FS <- FS[which(FS$Z0 >=0.20),]
+
+write.table(FS, "fullSib_pairs.txt", col.names = T, row.names = F, quote = F, sep = "\t")
+```
+
+
+##Inbreeding Coefficient
+
+
+
+```{bash, eval = FALSE}
+/programs/plink-1.9-x86_64-beta3.46/plink --vcf joint_genotype_filtered_SNPs_only_merge_PradoMartinez.vcf --chr-set 24 --keep-allele-order --vcf-idspace-to _ --allow-extra-chr --const-fid --out all_snps
+```
+
+
+
+
+```{r, eval= FALSE}
+allsnps<-read.delim("all_snps.bim", as.is=T, header=F)
+snp_vec<-paste('SNP', allsnps[,1], allsnps[,4], sep='-')
+allsnps[,2] <- snp_vec
+write.table(allsnps, "all_snps_wpos.bim", col.names = F, quote = F, row.names = F, sep='\t')
+
+oursnps_LDpruned<-read.delim("joint_filtered_snps_LDpruned.bim", as.is=T, header=F)
+snp_vec<-paste('SNP', oursnps_LDpruned[,1], oursnps_LDpruned[,4], sep='-')
+oursnps_LDpruned[,2] <- snp_vec
+write.table(oursnps_LDpruned, "joint_filtered_snps_LDpruned.bim", col.names = F, quote = F, row.names = F, sep='\t')
+
+
+#now we only want to match up the snps that are in our  joint_filtered_snps_LDpruned.bim from the entire snp set. 
+#subset the .freq file so it only includes the snps that are going to be used in our chimps
+
+all.snps.freq<-read.delim("all_chimp_ref_alleles.frqx", as.is = T, header = T) #load in freq file
+oursnps_LDpruned<-read.delim("joint_filtered_snps_LDpruned.bim", as.is=T, header=F) #load in our chimp snps
+vec<-oursnps_LDpruned[,2] #get your snps names
+
+df<-subset(all.snps.freq, all.snps.freq$SNP %in% vec)
+
+colnames(df) <- c("CHR", "SNP","A1", "A2", "C(HOM A1)", "C(HET)", "C(HOM A2)", "C(HAP A1)", "C(HAP A2)", 
+                  "C(MISSING)")
+
+head(df)
+
+write.table(df, "all_chimp_ref_alleles.frqx", col.names = T, quote = F, row.names = F, sep = '\t')
+
+
+```
+Error: Allele(s) on line 618 of --read-freq file don't match loaded
+values.
+
+awk '$2!="SNP-chr2A-64209"' joint_filtered_snps_LDpruned.BAD.bim > joint_filtered_snps_LDpruned.bim
