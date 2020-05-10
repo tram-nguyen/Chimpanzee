@@ -1,7 +1,7 @@
 ---
 title: "Chimp Pop Gen"
 author: "Tram Nguyen"
-date: "5/9/2020"
+date: "5/10/2020"
 output:
   word_document: default
   pdf_document: default
@@ -11,30 +11,62 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## Chimp Population Genetics Anaylsis
+# Chimp Population Genetics Anaylsis
 
 
-### Getting a STRUCTURE Plot
+## Getting a STRUCTURE Plot
+To investigate whether our sample are from one or multiple populations, we want to use STRUCTURE. First, we will run Structure on a subset of our samples (because using all the SNPs would be overkill), and then we will run Structure with ALL chimps samples to see if any of our chimps fall into the Pardo's chimps too. 
 
-Step 1. 
-Sometimes it is useful to generate a pruned subset of SNPs that are in approximate linkage equilibrium with each other. This can be achieved via two commands: --indep which prunes based on the variance inflation factor (VIF), which recursively removes SNPs within a sliding window; second, --indep-pairwise which is similar, except it is based only on pairwise genotypic correlation.
+** Step 1: ** Get a subset of SNPs to look at. 
+<br>
+```{bash every1000 SNPs, eval=F}
 
-Step 2. Convert VCF files to .bed .bim .fam files using PLINK
+#take every 5000 SNPs
+awk '$0 ~ /^#/ || NR % 5000==0' joint_genotype_filtered_SNPs_only_merge_PradoMartinez.vcf > all_samples_every5000_snps.vcf
 
+#count how many SNPs you have now
+grep -v "#" all_samples_every5000_snps.vcf | wc -l 
+#7868 SNPs
 
-```{bash making .bed .bim .fam files from your vcf, eval = FALSE}
-/programs/plink-1.9-x86_64-beta3.46/plink --vcf joint_genotype_filtered_SNPs_only.vcf --chr-set 24 --keep-allele-order --vcf-idspace-to _ --allow-extra-chr --const-fid --out joint_filtered_snps
+#count the number of individuals you have in your vcf
+awk '{if ($1 == "#CHROM"){print NF-9; exit}}' all_samples_every5000_snps.vcf
+#114
 ```
 
-Step 2. Choose your model complexity -- Run python script (provided by FastStructure) to figure out range of possible K values. 
+** Step 2: ** Convert your subsetted SNPs into a .str format for Structure using PGDSpider.
+<br>
+```{bash step2 Structure, eval=F}
+#make a .spid file in PGDSpider (on your local computer is the easiest way)
+
+#navigate into your PGDSpider folder on your server
+
+##use java 8 before you start PGDSpider2
+export JAVA_HOME=/usr/local/jdk1.8.0_121
+export PATH=$JAVA_HOME/bin:$PATH
+
+#run this command
+java -Xmx1024m -Xms512m -jar PGDSpider2-cli.jar -inputfile ../all_samples_every5000_snps.vcf -inputformat VCF -outputfile ../all_samples_every5000_snps.str -outputformat STRUCTURE -spid ../diploid_vcf_to_strc.spid
+
+```
+
+** Step 3: ** Edit your Structure mainparams and extraparams files. Run the Run.Structure.pl script.
+
+```{bash step3 Run_Structure, eval=F}
+#edit your mainparams
+#change the number of loci you have and also how many individuals are there
+
+#perl Run_structure.pl script
+#choose your K and reps
+
+#we will start with a K of 7 and reps of 5 just to see what we get.
 
 
-```{bash executing the faststructure program, eval = FALSE}
-python chooseK.py --input=join_filtered_SNPs_only
+
+
 ```
 
 
-###Calculating inbreeding coefficient in Plink
+## Calculating inbreeding coefficient in Plink
 
 1. IBC analyses are compared to expected allele frequencies in a panmictic non-inbred population. It determines whether windows of the genome are more homozygous than expected in a population at HWE to determine if it is inbred.The closest thing we have to a large panmitic population is using all the chimps we have (our joint filtered snps + pardo's). Therefore, I will run the inbreeding analysis on the entire data set that is merged, and then just subset out our individuals to look at their individual inbreeding coefficients. 
 
@@ -101,7 +133,7 @@ ggsave(a, file="individual_inbreeding_coeff.png", height=4, width=8, units="in",
 ```
 
 
-### Calcuating pairwise identity-by-descent (IBD, relatedness) between individuals
+# Calcuating pairwise identity-by-descent (IBD, relatedness) between individuals
 This analysis can be done with or without LD pruning first. We will do it both ways.
 The pairwise clustering based on IBS, as outlined in the previous section is useful for detecting pairs of individuals who look more different from each other than you'd expect in a random, homogeneous sample. In this section, we consider using the same genotype data to provide a complementary analysis: using estimates of pairwise IBD to find pairs of individuals who look too similar to eachother, i.e. more than we would expect by chance in a random sample.
 In a homogeneous sample, it is possible to calculate genome-wide IBD given IBS information, as long as a large number of SNPs are available (probably 1000 independent SNPs at a bare minimum; ideally 100K or more).
@@ -266,13 +298,34 @@ FS <- FS[which(FS$Z0 >=0.20),]
 write.table(FS, "fullSib_pairs.txt", col.names = T, row.names = F, quote = F, sep = "\t")
 ```
 
+<br><br>
 
-##Inbreeding Coefficient
+## Relatedness in VCFTools
+
+Because our IBD values are quite high using the PLINK relatedness, let's look at another measure in VCFtools.
+
+```{bash VCFTools IBD, eval=F}
+vcftools --vcf /workdir/tn337/Chimpanzee/joint_genotype_all_filtered.vcf --relatedness2
+#Inds compared to themselves will be 0.5 and everything else will be lower PHI_RELATEDNESS
+
+vcftools --vcf /workdir/tn337/Chimpanzee/joint_genotype_all_filtered.vcf --relatedness
+#this is another method but it says that is not suitable for small cohorts. we will try it anyway to compare.
+```
+
+
+
+## Inbreeding Coefficient
+
+
+```{bash VCFtools IBC}
+vcftools --vcf /workdir/tn337/Chimpanzee/joint_genotype_all_filtered.vcf --het
+```
 
 
 
 ```{bash, eval = FALSE}
 /programs/plink-1.9-x86_64-beta3.46/plink --vcf joint_genotype_filtered_SNPs_only_merge_PradoMartinez.vcf --chr-set 24 --keep-allele-order --vcf-idspace-to _ --allow-extra-chr --const-fid --out all_snps
+
 ```
 
 
